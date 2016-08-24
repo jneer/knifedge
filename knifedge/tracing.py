@@ -19,41 +19,41 @@ class BeamProfile:
 
     z = attr.ib(default=0)
     w = attr.ib(default=1)
-    err_z = attr.ib(default=0)
-    err_w = attr.ib(default=0)
+    z_error = attr.ib(default=0)
+    w_error = attr.ib(default=0)
 
 
-def profile_8416(z=0, x84=0, x16=1, err_x=0, err_z=0):
+def profile_8416(z=0, x84=0, x16=1, x_error=0, z_error=0):
     """Create BeamProfile from a 84/16 measurement.
     """
 
-    data = {'method': '1684', 'inputs': locals()}
+    data = {'method': '90/10', 'inputs': locals()}
 
     w = abs(x84 - x16)
-    if err_x is not None:
-        err_w = np.sqrt(2) * err_x
+    if x_error is not None:
+        w_error = np.sqrt(2) * x_error
     else:
-        err_w = None
+        w_error = None
 
-    profile = BeamProfile(z, w, err_z, err_w)
+    profile = BeamProfile(z, w, z_error, w_error)
     profile._data = data
 
     return profile
 
 
-def profile_9010(z=0, x90=0, x10=1, err_x=0, err_z=0):
+def profile_9010(z=0, x90=0, x10=1, x_error=0, z_error=0):
     """Create BeamProfile from a 90/10 measurement.
     """
 
-    data = {'method': '1090', 'inputs': locals()}
+    data = {'method': '90/10', 'inputs': locals()}
 
-    w = 1.28 * abs(x90 - x10)
-    if err_x is not None:
-        err_w = np.sqrt(2) * err_x
+    w = abs(x90 - x10) / 1.28
+    if x_error is not None:
+        w_error = np.sqrt(2) * x_error
     else:
-        err_w = None
+        w_error = None
 
-    profile = BeamProfile(z, w, err_z, err_w)
+    profile = BeamProfile(z, w, z_error, w_error)
     profile._data = data
 
     return profile
@@ -63,8 +63,53 @@ def traces_from_file(filename):
     with open(filename, 'r') as file:
         yaml_data = list(yaml.safe_load_all(file))
 
-    for data in yaml_data:
-        print(data)
+    traces = []
+
+    for trace_data in yaml_data:
+        try:
+            z_offset = trace_data['z_offset']
+            dz = trace_data['dz']
+            measurements = trace_data['measurements']
+            label = trace_data['label']
+            wavelength = trace_data['wavelength']
+            method = trace_data['method']
+        except KeyError as err:
+            print('Missing key:', err)
+            return
+
+        assert(len(dz) == len(measurements))
+        assert(method in ['90/10', '84/16'])
+
+        trace = BeamTrace(label, wavelength)
+
+        if method == '84/16':
+            x_error = trace_data.get('x_error', 0)
+            z_error = trace_data.get('z_error', 0)
+            for _dz, _meas in zip(dz, measurements):
+                trace.add_profile(profile_8416(z_offset + _dz, *_meas,
+                                               x_error=x_error,
+                                               z_error=z_error),
+                                  update_fit=False)
+
+        if method == '90/10':
+            x_error = trace_data.get('x_error', 0)
+            z_error = trace_data.get('z_error', 0)
+            for _dz, _meas in zip(dz, measurements):
+                trace.add_profile(profile_9010(z_offset + _dz, *_meas,
+                                               x_error=x_error,
+                                               z_error=z_error),
+                                  update_fit=False)
+
+        print('Beam trace:', label)
+        print('Method: {} | z_offset: {} mm | Wavelength: {} nm'.format(
+            method, z_offset, wavelength))
+        print('Fit result from {} profiles:'.format(len(dz)))
+        print('---')
+        trace.fit_trace()
+        print('---')
+        traces.append(trace)
+
+    return traces
 
 
 class BeamProfileSampled(BeamProfile):
@@ -79,8 +124,8 @@ class BeamTrace:
     """
 
     label = attr.ib(default="")
-    wavelength = attr.ib(default=.001550)
-    profiles = attr.ib(default=[])
+    wavelength = attr.ib(default=1550)
+    profiles = attr.ib(default=attr.Factory(list))
     fit_params = attr.ib(default=None)
     fit_params_error = attr.ib(default=None)
 
@@ -98,15 +143,19 @@ class BeamTrace:
         self.profiles.sort(key=lambda _: _.z)
 
     def spotsize(self, z, z0, w0, m2=1):
-        return w0 * np.sqrt(1 + ((z - z0) / (np.pi * w0**2 /
-                                             self.wavelength / m2))**2)
+        zR = np.pi * w0**2 / (1e-6 * self.wavelength * m2)
+        return w0 * np.sqrt(1 + ((z - z0) / zR)**2)
 
     def fit_trace(self, p0=None):
         z = [p.z for p in self.profiles]
         w = [p.w for p in self.profiles]
-        err_w = [p.err_w for p in self.profiles]
-        sigma = err_w if all(err_w) else None
-        absolute_sigma = all(err_w)
+        if p0 is None:
+            p0 = [z[w.index(min(w))],
+                  min(w),
+                  1]
+        w_error = [p.w_error for p in self.profiles]
+        sigma = w_error if all(w_error) else None
+        absolute_sigma = all(w_error)
         bounds = ([-np.inf, 0, 1], [np.inf, np.inf, np.inf])
         popt, pcov = curve_fit(self.spotsize, z, w, p0, sigma, absolute_sigma,
                                bounds=bounds)
@@ -118,8 +167,8 @@ class BeamTrace:
     def plot_trace(self):
         z = [p.z for p in self.profiles]
         w = [p.w for p in self.profiles]
-        err_w = [p.err_w for p in self.profiles]
-        plt.errorbar(z, w, err_w, fmt='.k')
+        w_error = [p.w_error for p in self.profiles]
+        plt.errorbar(z, w, w_error, fmt='.k')
         plt.xlabel('z [mm]')
         plt.ylabel('w [mm]')
 
@@ -144,31 +193,37 @@ class BeamTrace:
 def test_code():
 
 
-    traces_from_file('test-tracings.yml')
+    traces = traces_from_file('test-tracings.yml')
+    print(traces)
 
-    import random
-    error = .03
-    t = BeamTrace("test", .001550)
-    z = np.linspace(-200, 800, 7)
-    w = t.spotsize(z, 100, .3, 1) * np.random.normal(1, error, len(z))
-    err_z = np.zeros(len(z))
-    err_w = np.ones(len(z)) * error
+    traces[1].plot_trace()
+    plt.show()
 
-    profiles = list(map(BeamProfile, z, w, err_z, err_w))
-    t = BeamTrace("test", .001550, profiles)
-
-    print(t)
-
+    # error = .03
+    # t = BeamTrace("test", 1550)
+    # z = np.linspace(0, 600, 7)
+    # w = t.spotsize(z, 100, .3, 1) * np.random.normal(1, error, len(z))
+    # z_error = np.zeros(len(z))
+    # w_error = np.ones(len(z)) * error
+    #
+    # print(z)
+    # print(w)
+    #
+    # profiles = list(map(BeamProfile, z, w, z_error, w_error))
+    # t = BeamTrace("test", .001550, profiles)
+    #
+    # print(t)
+    #
     # for p in [p1, p2, p3, p4]:
     #     t.add_profile(p, update_fit=True)
 
     # print(t)
 
-    t.fit_trace()
+    # t.fit_trace()
 
 
-    t.plot_trace()
-    plt.show()
+    # t.plot_trace()
+    # plt.show()
 
 
 if __name__ == '__main__':
