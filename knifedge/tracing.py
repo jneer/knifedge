@@ -23,6 +23,67 @@ class BeamProfile:
     w_error = attr.ib(default=0)
 
 
+class BeamProfileSampled(BeamProfile):
+    """Beam profile sampled by intensity measurements at multiple positions
+    of the knife edge.
+    """
+
+
+@attr.s
+class BeamTrace:
+    """A trace of the size of a Gaussian beam along its axis.
+    """
+
+    label = attr.ib(default="")
+    wavelength = attr.ib(default=1550)
+    profiles = attr.ib(default=attr.Factory(list))
+    fit_params = attr.ib(default=None)
+    fit_params_error = attr.ib(default=None)
+
+    def __init__(self):
+        self.profiles = []
+        self.fit_params = None
+
+    def add_profile(self, profile, update_fit=True):
+        self.profiles.append(profile)
+        self.sort_profiles()
+        if update_fit:
+            self.fit_trace()
+
+    def sort_profiles(self):
+        self.profiles.sort(key=lambda _: _.z)
+
+    def spotsize(self, z, z0, w0, m2=1):
+        zR = np.pi * w0**2 / (1e-6 * self.wavelength * m2)
+        return w0 * np.sqrt(1 + ((z - z0) / zR)**2)
+
+    def fit_trace(self, p0=None):
+        z = [p.z for p in self.profiles]
+        w = [p.w for p in self.profiles]
+        if p0 is None:
+            p0 = [z[w.index(min(w))],
+                  min(w),
+                  1]
+        w_error = [p.w_error for p in self.profiles]
+        sigma = w_error if all(w_error) else None
+        absolute_sigma = all(w_error)
+        bounds = ([-np.inf, 0, 1], [np.inf, np.inf, np.inf])
+        popt, pcov = curve_fit(self.spotsize, z, w, p0, sigma, absolute_sigma,
+                               bounds=bounds)
+        self.fit_params = popt
+        self.fit_params_error = np.sqrt(np.diag(pcov))
+
+        print(self.format_fit_result())
+
+    def format_fit_result(self):
+        p_strings = ['z₀: {:.1f} ± {:.1f} mm',
+                     'w₀: {:.4f} ± {:.4f} mm',
+                     'M²: {:.2f} ± {:.2f}']
+        return '\n'.join([s.format(p, e) for s, p, e in
+                          zip(p_strings, self.fit_params,
+                                         self.fit_params_error)])
+
+
 def profile_8416(z=0, x84=0, x16=1, x_error=0, z_error=0):
     """Create BeamProfile from a 84/16 measurement.
     """
@@ -100,94 +161,41 @@ def traces_from_file(filename):
                                                z_error=z_error),
                                   update_fit=False)
 
-        print('Beam trace:', label)
+        print('\nBeam trace:', label)
         print('Method: {} | z_offset: {} mm | Wavelength: {} nm'.format(
             method, z_offset, wavelength))
-        print('Fit result from {} profiles:'.format(len(dz)))
-        print('---')
+        print('--- Fit result from {} profiles: ---'.format(len(dz)))
         trace.fit_trace()
-        print('---')
+        print('------------------------------------')
         traces.append(trace)
 
     return traces
 
 
-class BeamProfileSampled(BeamProfile):
-    """Beam profile sampled by intensity measurements at multiple positions
-    of the knife edge.
-    """
+def plot_trace(trace, fig=None, ax=None, figsize=(8, 6)):
+    if not fig and not ax:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
 
+    z = [p.z for p in trace.profiles]
+    w = [p.w for p in trace.profiles]
+    w_error = [p.w_error for p in trace.profiles]
 
-@attr.s
-class BeamTrace:
-    """A trace of the size of a Gaussian beam along its axis.
-    """
+    ax.errorbar(z, w, w_error, fmt='.k')
+    ax.set_xlabel('z [mm]')
+    ax.set_ylabel('w [mm]')
+    ax.set_ylim(ymin=0)
+    ax.set_title(trace.label)
 
-    label = attr.ib(default="")
-    wavelength = attr.ib(default=1550)
-    profiles = attr.ib(default=attr.Factory(list))
-    fit_params = attr.ib(default=None)
-    fit_params_error = attr.ib(default=None)
+    if trace.fit_params is not None:
+        zs = np.linspace(min(z), max(z), 200)
+        ws = trace.spotsize(zs, *trace.fit_params)
+        ax.plot(zs, ws)
+        ax.text(.1, .9, trace.format_fit_result(),
+                 verticalalignment='top',
+                 transform=plt.gca().transAxes,
+                 bbox=dict(facecolor='red', alpha=0.2))
 
-    def __init__(self):
-        self.profiles = []
-        self.fit_params = None
-
-    def add_profile(self, profile, update_fit=True):
-        self.profiles.append(profile)
-        self.sort_profiles()
-        if update_fit:
-            self.fit_trace()
-
-    def sort_profiles(self):
-        self.profiles.sort(key=lambda _: _.z)
-
-    def spotsize(self, z, z0, w0, m2=1):
-        zR = np.pi * w0**2 / (1e-6 * self.wavelength * m2)
-        return w0 * np.sqrt(1 + ((z - z0) / zR)**2)
-
-    def fit_trace(self, p0=None):
-        z = [p.z for p in self.profiles]
-        w = [p.w for p in self.profiles]
-        if p0 is None:
-            p0 = [z[w.index(min(w))],
-                  min(w),
-                  1]
-        w_error = [p.w_error for p in self.profiles]
-        sigma = w_error if all(w_error) else None
-        absolute_sigma = all(w_error)
-        bounds = ([-np.inf, 0, 1], [np.inf, np.inf, np.inf])
-        popt, pcov = curve_fit(self.spotsize, z, w, p0, sigma, absolute_sigma,
-                               bounds=bounds)
-        self.fit_params = popt
-        self.fit_params_error = np.sqrt(np.diag(pcov))
-
-        print(self.format_fit_result())
-
-    def plot_trace(self):
-        z = [p.z for p in self.profiles]
-        w = [p.w for p in self.profiles]
-        w_error = [p.w_error for p in self.profiles]
-        plt.errorbar(z, w, w_error, fmt='.k')
-        plt.xlabel('z [mm]')
-        plt.ylabel('w [mm]')
-
-        if self.fit_params is not None:
-            zs = np.linspace(min(z), max(z), 200)
-            ws = self.spotsize(zs, *self.fit_params)
-            plt.plot(zs, ws)
-            plt.text(.1, .9, self.format_fit_result(),
-                     verticalalignment='top',
-                     transform=plt.gca().transAxes,
-                     bbox=dict(facecolor='red', alpha=0.2))
-
-    def format_fit_result(self):
-        p_strings = ['z₀: {:.1f} ± {:.1f} mm',
-                     'w₀: {:.4f} ± {:.4f} mm',
-                     'M²: {:.2f} ± {:.2f}']
-        return '\n'.join([s.format(p, e) for s, p, e in
-                          zip(p_strings, self.fit_params,
-                                         self.fit_params_error)])
+    return fig, ax
 
 
 def test_code():
@@ -196,7 +204,7 @@ def test_code():
     traces = traces_from_file('test-tracings.yml')
     print(traces)
 
-    traces[1].plot_trace()
+    plot_trace(traces[0])
     plt.show()
 
     # error = .03
